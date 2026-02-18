@@ -39,6 +39,7 @@ async def get_mouse_pointer(data: List[MousePoint]):
     # print(data)
     result:ResponseBody = Pattern_Game().get_macro_result(data)
 
+    print(result)
     received_data:list = result.data
 
     # print(received_data)
