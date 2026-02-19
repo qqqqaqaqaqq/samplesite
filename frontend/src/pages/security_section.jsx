@@ -1,4 +1,4 @@
-import { useState, useRef } from "react";
+import { useState, useRef, useEffect } from "react";
 import { SendData } from './services/send_record';
 import PatternGame from "./pattern_trajectory";
 import CircularUnlock from "./circular_lock";
@@ -13,71 +13,138 @@ export default function Record() {
     const [score, setScore] = useState(0);
     const [_error_mean, set_Error_Mean] = useState(0.0);
     const [isSending, setIsSending] = useState(false);
+    const [countdown, setCountdown] = useState(null);
 
     const areaRef = useRef(null);
     const last_ts = useRef(performance.now());
     const isProcessing = useRef(false);
+    const idleTimer = useRef(null);
+    const countdownInterval = useRef(null);
+    const isDraggingRef = useRef(false);
+    const recordRef = useRef([]);
+    const handle_press_end_ref = useRef(null);
 
     const MAX_QUEUE_SIZE = 120;
     const tolerance = 0.001;
-    const isToggleMode = false;
+    const IDLE_TIMEOUT = 2000;
+
+    const clear_countdown = () => {
+        if (countdownInterval.current) {
+            clearInterval(countdownInterval.current);
+            countdownInterval.current = null;
+        }
+        setCountdown(null);
+    };
+
+    const start_countdown = () => {
+        clear_countdown();
+        const start = performance.now();
+        setCountdown(IDLE_TIMEOUT);
+        countdownInterval.current = setInterval(() => {
+            const elapsed = performance.now() - start;
+            const remaining = Math.max(0, Math.ceil(IDLE_TIMEOUT - elapsed));
+            setCountdown(remaining);
+            if (remaining <= 0) clear_countdown();
+        }, 50);
+    };
+
+    const clear_idle_timer = () => {
+        if (idleTimer.current) {
+            clearTimeout(idleTimer.current);
+            idleTimer.current = null;
+        }
+        clear_countdown();
+    };
 
     const stop_and_clear = () => {
+        clear_idle_timer();
+        isDraggingRef.current = false;
         setIsDragging(false);
         setRecord([]);
+        recordRef.current = [];
         setScore(0);
     };
 
     const handle_press_start = () => {
         if (isSending || isProcessing.current) return;
-        setRecord([]);
-        setScore(0);
+        clear_idle_timer();
         last_ts.current = performance.now();
+        isDraggingRef.current = true;
         setIsDragging(true);
     };
 
-    // 마우스/터치 종료 시점 전송
-    const handle_press_end = async () => {
-        if (!isSending && !isProcessing.current) {
-            setIsDragging(false);
+    // 매 렌더마다 최신 함수로 교체
+    handle_press_end_ref.current = async () => {
+        if (!isDraggingRef.current) return;
+        if (isSending || isProcessing.current) return;
 
-            if (record.length >= MAX_QUEUE_SIZE) {
-                try {
-                    isProcessing.current = true;
-                    setIsSending(true);
+        clear_idle_timer();
+        isDraggingRef.current = false;
+        setIsDragging(false);
 
-                    const dataToSend = [...record];
-                    setRecord([]);
-                    setScore(0);
+        const currentRecord = recordRef.current;
 
-                    const result = await SendData(dataToSend);
-                    if (result !== undefined) set_Error_Mean(result);
+        if (currentRecord.length >= MAX_QUEUE_SIZE) {
+            try {
+                isProcessing.current = true;
+                setIsSending(true);
 
-                } catch (err) {
-                    console.error("Transmission failed:", err);
-                } finally {
-                    setTimeout(() => {
-                        setIsSending(false);
-                        isProcessing.current = false;
-                    }, 800);
-                }
-            } else {
-                // 120개 미만이면 그냥 초기화
+                const result = await SendData(currentRecord);
+                if (result !== undefined) set_Error_Mean(result);
+
                 setRecord([]);
+                recordRef.current = [];
                 setScore(0);
+
+            } catch (err) {
+                console.error("Transmission failed:", err);
+            } finally {
+                setTimeout(() => {
+                    setIsSending(false);
+                    isProcessing.current = false;
+                }, 800);
             }
+        } else if (currentRecord.length > 0) {
+            start_countdown();
+            idleTimer.current = setTimeout(() => {
+                stop_and_clear();
+            }, IDLE_TIMEOUT);
         }
     };
+
+    useEffect(() => {
+        const onWindowMouseUp = () => handle_press_end_ref.current();
+        const onWindowTouchEnd = () => handle_press_end_ref.current();
+
+        window.addEventListener("mouseup", onWindowMouseUp);
+        window.addEventListener("touchend", onWindowTouchEnd);
+
+        return () => {
+            window.removeEventListener("mouseup", onWindowMouseUp);
+            window.removeEventListener("touchend", onWindowTouchEnd);
+        };
+    }, []);
+
+    useEffect(() => {
+        return () => {
+            clear_idle_timer();
+        };
+    }, []);
 
     const handle_context_menu = (e) => {
         e.preventDefault();
         if (isSending || isProcessing.current) return;
-        if (!isDragging) handle_press_start();
+        if (!isDraggingRef.current) handle_press_start();
         else stop_and_clear();
     };
 
     const on_handle_move = (e) => {
-        if (!isDragging || isSending || isProcessing.current || record.length >= MAX_QUEUE_SIZE) return;
+        if (!isDraggingRef.current || isSending || isProcessing.current) return;
+
+        clear_idle_timer();
+        idleTimer.current = setTimeout(() => {
+            stop_and_clear();
+        }, IDLE_TIMEOUT);
 
         if (areaRef.current) {
             const now_ts = performance.now();
@@ -99,14 +166,15 @@ export default function Record() {
 
                 last_ts.current = now_ts;
 
-                setRecord(prev =>
-                    (prev.length >= MAX_QUEUE_SIZE ? prev : [...prev, newData])
-                );
+                setRecord(prev => {
+                    const next = [...prev, newData];
+                    recordRef.current = next;
+                    return next;
+                });
             }
         }
     };
 
-    // 🔹 실시간 progress 계산 (state 없이 바로 계산)
     const currentProgress = Math.min(record.length / MAX_QUEUE_SIZE, 1);
 
     return (
@@ -171,10 +239,7 @@ export default function Record() {
                     onTouchMove={on_handle_move}
                     onMouseDown={(e) => { if (mode === "drawing" && e.button === 0) handle_press_start(); }}
                     onTouchStart={() => { if (mode === "drawing") handle_press_start(); }}
-                    onMouseUp={handle_press_end}
-                    onMouseLeave={stop_and_clear}
                     onContextMenu={handle_context_menu}
-                    onTouchEnd={handle_press_end}
                 >
                     {mode === "pattern" && (
                         <PatternGame
@@ -201,11 +266,33 @@ export default function Record() {
                 </main>
 
                 <footer className="security-panel">
+                    {/* 상태 표시 영역 */}
                     <div className="status-indicator">
                         <div className={`dot ${isDragging ? 'active' : ''}`}></div>
-                        <span>{isDragging ? '수집 중 (우클릭/영역이탈 시 초기화)' : '대기 중'}</span>
+                        <div className="status-text">
+                            <span>
+                                {isDragging 
+                                    ? '수집 중 (우클릭으로 초기화)' 
+                                    : '대기 중'}
+                            </span>
+                            {!isDragging && countdown !== null && countdown > 0 && (
+                                <span className="countdown-text">{countdown}ms 후 초기화</span>
+                            )}
+                        </div>
+                    </div>
+
+                    {/* 매크로 의심 기준 영역 */}
+                    <div className="macro-criteria">
+                        <h4>매크로 판단 기준</h4>
+                        <ul>
+                            <li>110% 이상 → 이상치 의심 (매크로 판단)</li>
+                            <li>90% ~ 109% → 매크로 의심 (재요청 시 유지하면 매크로)</li>
+                            <li>80% ~ 89% → 경계선</li>
+                            <li>80% 이하 → 정상 휴먼</li>
+                        </ul>
                     </div>
                 </footer>
+
 
             </div>
         </div>
