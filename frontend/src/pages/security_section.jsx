@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect } from "react";
+import { useState, useRef } from "react";
 import { SendData } from './services/send_record';
 import PatternGame from "./pattern_trajectory";
 import CircularUnlock from "./circular_lock";
@@ -36,9 +36,36 @@ export default function Record() {
         setIsDragging(true);
     };
 
-    const handle_press_end = () => {
-        if (!isSending && !isProcessing.current && !isToggleMode) {
-            stop_and_clear();
+    // 마우스/터치 종료 시점 전송
+    const handle_press_end = async () => {
+        if (!isSending && !isProcessing.current) {
+            setIsDragging(false);
+
+            if (record.length >= MAX_QUEUE_SIZE) {
+                try {
+                    isProcessing.current = true;
+                    setIsSending(true);
+
+                    const dataToSend = [...record];
+                    setRecord([]);
+                    setScore(0);
+
+                    const result = await SendData(dataToSend);
+                    if (result !== undefined) set_Error_Mean(result);
+
+                } catch (err) {
+                    console.error("Transmission failed:", err);
+                } finally {
+                    setTimeout(() => {
+                        setIsSending(false);
+                        isProcessing.current = false;
+                    }, 800);
+                }
+            } else {
+                // 120개 미만이면 그냥 초기화
+                setRecord([]);
+                setScore(0);
+            }
         }
     };
 
@@ -78,33 +105,6 @@ export default function Record() {
             }
         }
     };
-
-    // 데이터 전송
-    useEffect(() => {
-        const fetchSend = async () => {
-            if (isProcessing.current || record.length < MAX_QUEUE_SIZE) return;
-            try {
-                isProcessing.current = true;
-                setIsSending(true);
-                setIsDragging(false);
-
-                const dataToSend = [...record];
-                setRecord([]);
-                setScore(0);
-
-                const result = await SendData(dataToSend);
-                if (result !== undefined) set_Error_Mean(result);
-            } catch (err) {
-                console.error("Transmission failed:", err);
-            } finally {
-                setTimeout(() => {
-                    setIsSending(false);
-                    isProcessing.current = false;
-                }, 800);
-            }
-        };
-        fetchSend();
-    }, [record.length]);
 
     // 🔹 실시간 progress 계산 (state 없이 바로 계산)
     const currentProgress = Math.min(record.length / MAX_QUEUE_SIZE, 1);
@@ -151,7 +151,7 @@ export default function Record() {
                                 className="fill"
                                 style={{
                                     width: `${currentProgress * 100}%`,
-                                    transition: "none" // 🔹 즉시 반영
+                                    transition: "none"
                                 }}
                             ></div>
                         </div>
@@ -174,7 +174,7 @@ export default function Record() {
                     onMouseUp={handle_press_end}
                     onMouseLeave={stop_and_clear}
                     onContextMenu={handle_context_menu}
-                    onTouchEnd={stop_and_clear}
+                    onTouchEnd={handle_press_end}
                 >
                     {mode === "pattern" && (
                         <PatternGame
